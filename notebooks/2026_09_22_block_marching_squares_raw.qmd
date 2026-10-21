@@ -1,0 +1,376 @@
+---
+title:  Comparing Marching Squares vs. the Momepy street enclosures. 
+author: Uriel Legaria
+jupyter: python3
+---
+
+I am going to compare two approaches to obtaining the blocks.
+
+1. Momepy's enclosed tessellation.
+2. Segmenting blocks using marching squares over building footprint data. 
+
+
+### Collecting the data
+
+First I need to obtain the street networks over the 4 cities for which we have data in the *Million Neighborhoods* folder: Boston, Charlotte, Pittsburgh, and Manhattan. 
+
+```{python}
+PATH_DATA_BOSTON = "/Users/legariapena.j/Library/CloudStorage/GoogleDrive-legariapena.j@husky.neu.edu/Shared drives/Drawing Participation/Million Neighborhoods/Spatial Data/ma-bos-buildings/structures_poly_35.shp"
+
+PATH_DATA_CHARLOTTE = "/Users/legariapena.j/Library/CloudStorage/GoogleDrive-legariapena.j@husky.neu.edu/Shared drives/Drawing Participation/Million Neighborhoods/Spatial Data/nc-charlotte-buildings/buildings_with_parcels_Charlotte-NC.geojson"
+
+PATH_DATA_PITTSBURGH = "/Users/legariapena.j/Library/CloudStorage/GoogleDrive-legariapena.j@husky.neu.edu/Shared drives/Drawing Participation/Million Neighborhoods/Spatial Data/pa-pittsburgh-buildings/AlleghenyCounty_Footprints.geojson"
+
+PATH_DATA_MANHATTAN = "/Users/legariapena.j/Library/CloudStorage/GoogleDrive-legariapena.j@husky.neu.edu/Shared drives/Drawing Participation/Million Neighborhoods/Spatial Data/ny-manhattan-buildings/geo_export_a80ea1a2-e8e0-4ffd-862c-1199433ac303.shp"
+
+
+import os
+import geopandas as gpd
+import pyogrio
+
+# Without this, GDAL fails on the Pittsburgh GeoJSON ("Unterminated object")
+pyogrio.set_gdal_config_options({"OGR_GEOJSON_MAX_OBJ_SIZE": "0"})
+
+gdf_charlotte = gpd.read_file(PATH_DATA_CHARLOTTE)
+gdf_boston = gpd.read_file(PATH_DATA_BOSTON)
+gdf_pittsburgh = gpd.read_file(PATH_DATA_PITTSBURGH)
+gdf_manhattan = gpd.read_file(PATH_DATA_MANHATTAN)
+
+gdf_boston.plot()
+
+convex_hull_geometry = gdf_boston["geometry"].convex_hull
+
+import osmnx as ox
+
+def download_street_network_from_gdf(
+    gdf:gpd.GeoDataFrame,
+    save_path:str,
+):
+    print(f"Gathering street network for {save_path}")
+    if not os.path.exists(save_path):
+        gdf_copy = gdf.copy()
+        gdf_copy = gdf_copy.to_crs(4326)
+        single_hull = gdf_copy.union_all().convex_hull
+        street_network = ox.graph_from_polygon(single_hull, network_type = "drive")
+    
+        street_network_gdf = ox.graph_to_gdfs(street_network, nodes = False)
+        street_network_gdf.to_file(save_path)
+    
+
+
+#Download the street networks before getting the blocks
+from pathlib import Path
+PARENT_PATH  = "/Users/legariapena.j/Documents/Parcel_project/data"
+download_street_network_from_gdf(gdf_boston, Path(PARENT_PATH) / "boston_streets.gpkg")
+download_street_network_from_gdf(gdf_charlotte, Path(PARENT_PATH) / "charlotte_streets.gpkg")
+download_street_network_from_gdf(gdf_pittsburgh, Path(PARENT_PATH) / "pittsburgh_streets.gpkg")
+download_street_network_from_gdf(gdf_manhattan, Path(PARENT_PATH) / "manhattan_streets.gpkg")
+```
+
+#### Footprints and Street Network plots
+
+```{python}
+#Plotting the building footprints and the street networks. 
+
+import matplotlib.pyplot as plt
+
+city_gdfs = {
+    "Boston": gdf_boston,
+    "Charlotte": gdf_charlotte,
+    "Pittsburgh": gdf_pittsburgh,
+    "Manhattan": gdf_manhattan,
+}
+
+fig, axes = plt.subplots(2, 2, figsize=(12, 12))
+for ax, (city, gdf_city) in zip(axes.flat, city_gdfs.items()):
+    gdf_city.plot(ax=ax)
+    ax.set_title(city)
+fig.suptitle("Building footprints in 4 cities")
+plt.tight_layout()
+
+
+PATH_STREET_NETWORK_BOSTON = Path(PARENT_PATH) / "boston_streets.gpkg"
+PATH_STREET_NETWORK_CHARLOTTE = Path(PARENT_PATH) / "charlotte_streets.gpkg"
+PATH_STREET_NETWORK_PITTSBURGH = Path(PARENT_PATH) / "pittsburgh_streets.gpkg"
+PATH_STREET_NETWORK_MANHATTAN = Path(PARENT_PATH) / "manhattan_streets.gpkg"
+
+gdf_sn_boston = gpd.read_file(PATH_STREET_NETWORK_BOSTON)
+gdf_sn_charlotte = gpd.read_file(PATH_STREET_NETWORK_CHARLOTTE)
+gdf_sn_pittsburgh = gpd.read_file(PATH_STREET_NETWORK_PITTSBURGH)
+gdf_sn_manhattan = gpd.read_file(PATH_STREET_NETWORK_MANHATTAN)
+
+
+street_network_gdfs = {
+    "Boston": gdf_sn_boston,
+    "Charlotte": gdf_sn_charlotte,
+    "Pittsburgh": gdf_sn_pittsburgh,
+    "Manhattan": gdf_sn_manhattan
+}
+
+COLOR_STREETS = "#9e0037"
+
+
+fig, ax = plt.subplots(2, 2, figsize = (10,10))
+for ax, (city, gdf_sn) in zip(ax.flat, street_network_gdfs.items()):
+    gdf_sn.plot(ax = ax, linewidth = 0.1, color = COLOR_STREETS)
+    ax.set_title(city)
+
+fig.suptitle("Street network in 4 cities")
+```
+
+#### Segmenting blocks with momepy
+Now I'll use momepy's `enclosed_tesellation` function to obtain the blocks using the street network enclosures. 
+
+```{python}
+import momepy
+
+
+def export_blocks(
+    street_network_gdf, 
+    save_path_blocks,
+):
+    if not os.path.exists(save_path_blocks):
+        street_network_gdf = street_network_gdf.to_crs(street_network_gdf.estimate_utm_crs())
+        blocks = momepy.enclosures(street_network_gdf)
+        blocks.to_file(save_path_blocks)
+    
+    blocks = gpd.read_file(save_path_blocks)
+
+    return blocks 
+
+
+blocks_boston = export_blocks(gdf_sn_boston, Path(PARENT_PATH) / "boston_blocks.gpkg")
+blocks_charlotte = export_blocks(gdf_sn_charlotte, Path(PARENT_PATH) / "charlotte_blocks.gpkg")
+blocks_pittsburgh = export_blocks(gdf_sn_pittsburgh, Path(PARENT_PATH) / "pittsburgh_blocks.gpkg")
+blocks_manhattan = export_blocks(gdf_sn_manhattan, Path(PARENT_PATH) / "manhattan_blocks.gpkg")
+```
+
+
+#### Plotting the blocks
+
+```{python}
+import sys
+# This copy of alivestreets has the MapVisualizer that accepts a CARTO API key
+sys.path.append("/Users/legariapena.j/Documents/SV-paper-refinement/3 - SVI analysis re-do/src/alivestreets")
+
+from shapely.geometry import box
+from alivestreets.visualization.map_visualizer import MapVisualizer
+
+# The whole city is too wide to tell the blocks apart, so each map shows one 500 m x 500 m window.
+# It is the same window that the marching squares step uses, for both the enclosures and the contours.
+HALF_WINDOW = 250
+PATH_ENV = "/Users/legariapena.j/Documents/SV-paper-refinement/.env"
+
+
+def read_carto_key():
+    lines = Path(PATH_ENV).read_text(encoding = "utf-8").split("\n")
+    for line in lines:
+        if line.startswith("CARTO_API_KEY="):
+            return line.split("=", 1)[1].strip()
+
+    raise ValueError("CARTO_API_KEY not found in .env")
+
+
+CARTO_API_KEY = read_carto_key()
+
+
+def get_window_center(
+    gdf_footprints,
+    crs,
+    center_lon_lat = None,
+):
+    # Default window center: the median building, which lands in the built-up area
+    if center_lon_lat is None:
+        centroids = gdf_footprints.to_crs(crs).geometry.centroid
+        return centroids.x.median(), centroids.y.median()
+
+    center = gpd.GeoSeries(gpd.points_from_xy([center_lon_lat[0]], [center_lon_lat[1]]), crs = 4326).to_crs(crs)
+    return center.x[0], center.y[0]
+
+
+def plot_window_contours(gdf, center, color, title):
+    # The basemap is in web mercator (EPSG:3857), so the window is converted to it
+    center_x, center_y = center
+    window = box(center_x - HALF_WINDOW, center_y - HALF_WINDOW, center_x + HALF_WINDOW, center_y + HALF_WINDOW)
+    x_min, y_min, x_max, y_max = gpd.GeoSeries([window], crs = gdf.crs).to_crs(3857).total_bounds
+    gdf_window = gdf.to_crs(3857).cx[x_min:x_max, y_min:y_max]
+
+    map_visualizer = MapVisualizer()
+    map_visualizer.initialize_map(figsize = (6, 6))
+    # Contours only, so the basemap stays visible
+    gdf_window.boundary.plot(ax = map_visualizer.ax, color = color, linewidth = 1.5)
+    map_visualizer.ax.set_xlim(x_min, x_max)
+    map_visualizer.ax.set_ylim(y_min, y_max)
+    map_visualizer.add_basemap(alpha = 0.8, api_key = CARTO_API_KEY)
+    map_visualizer.finalize_map(title = title)
+
+
+window_centers = {
+    "Boston": get_window_center(gdf_boston, blocks_boston.crs, center_lon_lat = (-71.09361, 42.31827)),  # Roxbury
+    "Charlotte": get_window_center(gdf_charlotte, blocks_charlotte.crs),
+    "Pittsburgh": get_window_center(gdf_pittsburgh, blocks_pittsburgh.crs),
+    "Manhattan": get_window_center(gdf_manhattan, blocks_manhattan.crs),
+}
+
+blocks_dictionary = {
+    "Boston": blocks_boston,
+    "Charlotte": blocks_charlotte,
+    "Pittsburgh": blocks_pittsburgh,
+    "Manhattan": blocks_manhattan
+}
+
+
+for city_name, gdf_blocks in blocks_dictionary.items():
+    plot_window_contours(gdf_blocks, window_centers[city_name], color = "#932feb", title = f"{city_name}: momepy enclosures")
+
+```
+
+
+
+#### Marching squares
+```{python}
+import sys
+sys.path.append("/Users/legariapena.j/Documents/Parcel_project/src")
+
+from footprint_rasterize import get_distance_to_footprint_field
+from marching_squares import MarchingSquares
+
+SAVE_PATH_MARCHING_SQUARES_BOSTON = Path(PARENT_PATH)/"marching_squares_boston.gpkg"
+SAVE_PATH_MARCHING_SQUARES_CHARLOTTE = Path(PARENT_PATH)/"marching_squares_charlotte.gpkg"
+SAVE_PATH_MARCHING_SQUARES_MANHATTAN = Path(PARENT_PATH)/"marching_squares_manhattan.gpkg"
+SAVE_PATH_MARCHING_SQUARES_PITTSBURGH = Path(PARENT_PATH)/"marching_squares_pittsburgh.gpkg"
+
+# A whole city does not fit in memory at 0.5 m, so each city uses one 500 m x 500 m window
+# (HALF_WINDOW and get_window_center are in the block plot cell).
+# One window takes about 15 s and 5 GB of RAM.
+D0 = 9.0
+
+
+def get_marching_squares_blocks(
+    gdf_footprints,
+    crs,
+    save_path,
+    center_lon_lat = None,
+):
+    if not os.path.exists(save_path):
+        gdf_metric = gdf_footprints.to_crs(crs)
+        center_x, center_y = get_window_center(gdf_metric, crs, center_lon_lat)
+
+        gdf_window = gdf_metric.cx[
+            center_x - HALF_WINDOW:center_x + HALF_WINDOW,
+            center_y - HALF_WINDOW:center_y + HALF_WINDOW,
+        ]
+
+        distance_field, transform = get_distance_to_footprint_field(gdf_window)
+
+        marching_squares = MarchingSquares(distance_field)
+        marching_squares.march(D0)
+        polygons = marching_squares.to_polygons(transform, crs)
+        polygons.to_file(save_path)
+
+    polygons = gpd.read_file(save_path)
+
+    return polygons
+
+
+# Same CRS as the momepy blocks, so the two can be compared directly
+polygons_boston = get_marching_squares_blocks(gdf_boston, blocks_boston.crs, SAVE_PATH_MARCHING_SQUARES_BOSTON, center_lon_lat = (-71.09361, 42.31827))  # Roxbury
+polygons_charlotte = get_marching_squares_blocks(gdf_charlotte, blocks_charlotte.crs, SAVE_PATH_MARCHING_SQUARES_CHARLOTTE)
+polygons_pittsburgh = get_marching_squares_blocks(gdf_pittsburgh, blocks_pittsburgh.crs, SAVE_PATH_MARCHING_SQUARES_PITTSBURGH)
+polygons_manhattan = get_marching_squares_blocks(gdf_manhattan, blocks_manhattan.crs, SAVE_PATH_MARCHING_SQUARES_MANHATTAN)
+```
+
+#### Plotting the marching squares blocks
+
+```{python}
+polygons_dictionary = {
+    "Boston": polygons_boston,
+    "Charlotte": polygons_charlotte,
+    "Pittsburgh": polygons_pittsburgh,
+    "Manhattan": polygons_manhattan
+}
+
+
+for city_name, gdf_polygons in polygons_dictionary.items():
+    plot_window_contours(gdf_polygons, window_centers[city_name], color = "#e2552f", title = f"{city_name}: marching squares contours")
+
+```
+
+Our last step is running the actual comparisons and plotting. The metrics being displayed in the following plot are:
+
+1. Segmentation quality (SQ):
+Keeping the pairs of blocks for which $IoU > m = 0.5$, compute the mean IoU. Since we are imposing a threshold $m$ the average will be higher than $m$, so we can expect scores above $0.5$ for this metric. 
+
+2. Recognition quality (RQ): F-Score of the matched blocks, taking the momepy blocks as the ground truth. 
+
+3. Panoramic Quality (PQ): It's defined as the product of $SQ$ and $RQ$:
+
+$$ PQ = RQ \times SQ $$
+
+4. Boundary F at distinct radiuses. How much do the boundaries of the marching squares and momepy blocks intersects, using an allowance buffer of $2$~m, $5$~m and $10$~m.
+
+```{python}
+from shapely.geometry import box
+from footprint_metrics import get_average_iou, get_panoptic_quality, get_boundary_f_score
+from imageable.visualization.data_visualization import plot_grouped_distribution_bars
+
+BOUNDARY_TOLERANCES = [2.0, 5.0, 10.0]
+
+
+def get_evaluation_layers(
+    gdf_blocks,
+    gdf_polygons,
+    gdf_footprints,
+):
+    # Clip the enclosures to the marching squares window, so both methods are cut at the same edge.
+    # Keep the enclosures that contain at least one building.
+    window = box(*gdf_polygons.total_bounds)
+    gdf_blocks = gdf_blocks.clip(window, keep_geom_type = True)
+    gdf_footprints_window = gdf_footprints.to_crs(gdf_blocks.crs).clip(window)
+    blocks_with_buildings = gpd.sjoin(gdf_blocks, gdf_footprints_window[["geometry"]], predicate = "intersects").index
+    gdf_blocks = gdf_blocks[gdf_blocks.index.isin(blocks_with_buildings)]
+
+    # Void rule of panoptic quality: drop the predictions that lie mostly outside the kept enclosures
+    evaluation_area = gdf_blocks.union_all()
+    share_inside = gdf_polygons.intersection(evaluation_area).area / gdf_polygons.area
+    gdf_polygons = gdf_polygons[share_inside > 0.5]
+
+    return gdf_blocks, gdf_polygons
+
+
+metric_values = {}
+for city, gdf_footprints in city_gdfs.items():
+    gdf_blocks = gpd.read_file(Path(PARENT_PATH) / f"{city.lower()}_blocks.gpkg")
+    gdf_polygons = gpd.read_file(Path(PARENT_PATH) / f"marching_squares_{city.lower()}.gpkg")
+    gdf_blocks, gdf_polygons = get_evaluation_layers(gdf_blocks, gdf_polygons, gdf_footprints)
+
+    panoptic_quality = get_panoptic_quality(gdf_blocks, gdf_polygons)
+    values = [
+        panoptic_quality["pq"],
+        panoptic_quality["sq"],
+        panoptic_quality["rq"],
+        get_average_iou(gdf_blocks, gdf_polygons),
+    ]
+    for tolerance in BOUNDARY_TOLERANCES:
+        values.append(get_boundary_f_score(gdf_blocks, gdf_polygons, tolerance = tolerance)["f_score"])
+
+    metric_values[city] = values
+    print(f"{city}: {len(gdf_blocks)} enclosures, {len(gdf_polygons)} marching squares blocks, TP {panoptic_quality['tp']}, FP {panoptic_quality['fp']}, FN {panoptic_quality['fn']}")
+
+
+METRIC_NAMES = ["PQ", "SQ", "RQ", "Average IoU"] + [f"Boundary F ({tolerance:.0f} m)" for tolerance in BOUNDARY_TOLERANCES]
+
+# The values argument of this function is called rmse
+fig, ax = plot_grouped_distribution_bars(
+    groups = METRIC_NAMES,
+    model_names = list(metric_values.keys()),
+    rmse = metric_values,
+    title = "Marching squares blocks vs. momepy enclosures",
+    x_label = "Metric",
+    y_label = "Score",
+    order = "input",
+    show_n = False,
+)
+```
+
+
